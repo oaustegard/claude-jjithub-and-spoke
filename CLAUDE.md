@@ -18,19 +18,45 @@ onto `$PATH` at boot. See [`skills/ghi/SKILL.md`](skills/ghi/SKILL.md).
 Repo-level ops happen through `jj git ...` and direct git plumbing where
 needed.
 
-## This hub is PR-free
+## Where the agent stops, where the PR begins
 
-We do **not** use `gh pr create` or GitHub PR creation from here. The
-review hand-off is: push the bookmark, then surface a compare URL.
+The hub is not PR-free — GitHub collaboration through jj **is** a PR
+workflow, and the upstream docs prescribe exactly that. Bookmarks
+exist precisely because "GitHub currently only is able to compare
+bookmarks" (jj docs); they're the named ref a PR points at. The
+distinction is about *who opens the PR*: the agent stops at the push,
+the human opens the PR from the compare URL and merges in the GitHub
+web UI.
 
 ```bash
 jj git push --bookmark feature-x
 echo "Review: https://github.com/<owner>/<repo>/compare/main...feature-x"
+# Human clicks "Create pull request", reviews, merges.
+# Back on the spoke afterwards:
+jj git fetch                              # advances local main to the merged tip
 ```
 
-A human reviews and merges in the GitHub web UI. If you find yourself
-reaching for `gh pr create` or "let me install `gh` quickly" — stop.
-That's the wrong mental model for this hub.
+There is no `gh` CLI here, so the agent can't open the PR itself even
+if it wanted to. Don't try to install `gh` to work around this — the
+compare URL is the deliberate hand-off point.
+
+### Ephemeral changes: let jj name the bookmark
+
+For one-off changes where a meaningful bookmark name doesn't add
+anything, `jj git push --change @-` will generate a bookmark name
+(`push-<change-id>`) and push it in one step. The upstream docs lead
+with this form for the basic workflow. Reach for an explicit
+`--bookmark <name>` when the name is going to live in PR titles,
+discussions, or longer-running stacks.
+
+### Direct-to-trunk: special case, not default
+
+Pushing straight to `main` (advance the `main` bookmark locally, then
+`jj git push --bookmark main`) is a fine path for tiny fixes on repos
+without branch protection — but it is *not* what jj's GitHub docs
+prescribe as the default. The default is bookmark → PR → merge → fetch.
+Don't push to trunk unprompted; if a change feels too small for a PR,
+ask first.
 
 ## Spoke clone convention: `./.spokes/<name>` (mandatory)
 
@@ -90,8 +116,11 @@ jj bookmark create feature-x -r @
 # 6. Push the bookmark — credential helper supplies the token
 jj git push --bookmark feature-x
 
-# 7. Hand off to the reviewer
+# 7. Hand off: the human opens the PR from the compare URL
 echo "Review: https://github.com/owner/repo/compare/main...feature-x"
+
+# 8. After the human merges the PR, pull the new trunk tip
+jj git fetch                              # advances main@origin → main
 ```
 
 ### Updating an open feature: stack more changes
