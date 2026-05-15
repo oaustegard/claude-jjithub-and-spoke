@@ -13,9 +13,10 @@ GitHub repos cloned under `./.spokes/`.
 - `ui.paginate = "never"`, `ui.default-command = "log"`
 
 There is **no `gh` CLI** here. This hub is jj-native at the VCS layer.
-Issue ops land via a stdlib `ghi` CLI (see issue #2 — not in this
-deliverable). Repo-level ops happen through `jj git ...` and direct git
-plumbing where needed.
+Issue ops land via the bundled stdlib `ghi` CLI — `bin/ghi`, symlinked
+onto `$PATH` at boot. See [`skills/ghi/SKILL.md`](skills/ghi/SKILL.md).
+Repo-level ops happen through `jj git ...` and direct git plumbing where
+needed.
 
 ## This hub is PR-free
 

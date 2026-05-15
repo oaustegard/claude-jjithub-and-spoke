@@ -5,9 +5,10 @@
 # work without exposing the token in URLs.
 #
 # This hub is intentionally jj-native at the VCS layer — there is no `gh`
-# install here. Issue ops are handled separately by a stdlib `ghi` CLI
-# (see issue #2). PR creation is not part of the flow; reviews hand off
-# to a human via compare URLs (see CLAUDE.md).
+# install here. Issue ops are handled separately by the bundled stdlib
+# `ghi` CLI (see `bin/ghi` + `skills/ghi/SKILL.md`). PR creation is not
+# part of the flow; reviews hand off to a human via compare URLs (see
+# CLAUDE.md).
 #
 # Required env (from .env, gitignored):
 #   GH_TOKEN          — GitHub PAT used for /user lookup and git auth helper
@@ -65,6 +66,15 @@ else
     summary "✓ jj already installed ($(jj --version))"
 fi
 
+# ── Symlink bundled ghi onto PATH ──
+# Stdlib GitHub Issues CLI; PR ops intentionally absent (compare-URL flow).
+GHI_BIN="$PROJECT_DIR/bin/ghi"
+if [ -x "$GHI_BIN" ]; then
+    ln -sf "$GHI_BIN" /usr/local/bin/ghi 2>/dev/null \
+        || sudo ln -sf "$GHI_BIN" /usr/local/bin/ghi
+    summary "✓ ghi linked from $GHI_BIN"
+fi
+
 # ── Configure jj identity ──
 # Priority: explicit $JJ_USER_NAME / $JJ_USER_EMAIL > GitHub /user lookup.
 JJ_CFG="$HOME/.config/jj/config.toml"
@@ -116,6 +126,18 @@ if [ -n "${GH_TOKEN:-}" ]; then
     summary "✓ git credential helper configured for github.com"
 fi
 
+# ── Sanity probe: ghi auth status ──
+# Only when both the token and the binary are present. Parse line 1 of
+# `ghi auth status`: "Logged in as <login>" — awk '{print $NF}' yields login.
+if [ -n "${GH_TOKEN:-}" ] && command -v ghi >/dev/null 2>&1; then
+    GHI_USER=$(ghi auth status 2>/dev/null | head -1 | awk '{print $NF}')
+    if [ -n "$GHI_USER" ]; then
+        summary "✓ ghi authenticated as $GHI_USER"
+    else
+        summary "✗ ghi auth failed (check GH_TOKEN)"
+    fi
+fi
+
 # ── Summary ──
 echo "── claude-jj-and-spoke boot ──"
 for line in "${SUMMARY_LINES[@]}"; do echo "  $line"; done
@@ -124,3 +146,4 @@ echo "  ✓ $JJ_VERSTR ready as $JJ_USER_NAME <$JJ_USER_EMAIL>"
 echo ""
 echo "Try:  jj git clone https://github.com/owner/repo .spokes/repo"
 echo "      jj log   |   jj op log   |   jj --help"
+echo "      ghi auth status   |   ghi issue list --repo OWNER/NAME"

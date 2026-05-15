@@ -1,0 +1,335 @@
+#!/usr/bin/env python3
+"""ghi — stdlib-only CLI for GitHub Issues.
+
+Replaces what `gh issue` would have given us, without dragging in the `gh`
+binary. This hub does not use GitHub PRs (compare-URL hand-off via jj),
+so issues-only is enough surface; PRs / merge / releases are out of scope.
+
+Auth: $GH_TOKEN (classic PAT). Every request sends the three mandatory
+headers — User-Agent, Authorization (token …), Accept — per the
+github-procedures lessons we've paid for the hard way (GitHub returns
+401 without a User-Agent; classic PATs use `token`, not `Bearer`).
+
+Sibling of claude-tangled-spoke's `bin/tg`.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from typing import Any
+
+VERSION = "0.1.0"
+USER_AGENT = f"ghi/{VERSION}"
+API = "https://api.github.com"
+
+
+# ── HTTP helpers ────────────────────────────────────────────────────────────
+
+class GHError(Exception):
+    def __init__(self, status: int, body: str, message: str = ""):
+        super().__init__(message or f"GitHub API {status}: {body[:300]}")
+        self.status = status
+        self.body = body
+
+
+def _token() -> str:
+    token = os.environ.get("GH_TOKEN")
+    if not token:
+        sys.exit("ghi: GH_TOKEN env var not set")
+    return token
+
+
+def _request(method: str, path: str, *, params: dict | None = None,
+             body: dict | None = None, timeout: float = 30.0) -> Any:
+    url = f"{API}{path}"
+    if params:
+        flat = []
+        for k, v in params.items():
+            if v is None:
+                continue
+            if isinstance(v, list):
+                flat.append((k, ",".join(str(x) for x in v)))
+            else:
+                flat.append((k, str(v)))
+        if flat:
+            url += "?" + urllib.parse.urlencode(flat)
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, method=method, data=data)
+    req.add_header("User-Agent", USER_AGENT)
+    req.add_header("Authorization", f"token {_token()}")
+    req.add_header("Accept", "application/vnd.github+json")
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            payload = resp.read()
+            return json.loads(payload) if payload else None
+    except urllib.error.HTTPError as e:
+        body_text = e.read().decode("utf-8", "replace") if e.fp else ""
+        raise GHError(e.code, body_text)
+
+
+# ── Parsing helpers ─────────────────────────────────────────────────────────
+
+def _split_repo(arg: str) -> tuple[str, str]:
+    if "/" not in arg:
+        sys.exit(f"ghi: --repo must be OWNER/NAME, got {arg!r}")
+    owner, name = arg.split("/", 1)
+    return owner, name
+
+
+def _split_csv(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _format_issue_line(issue: dict) -> str:
+    labels = ",".join(l["name"] for l in issue.get("labels") or [])
+    user = (issue.get("user") or {}).get("login", "?")
+    return (f"#{issue['number']}\t{issue['state']:<6}\t{issue['title']}\t"
+            f"by {user}\tlabels: {labels or '(none)'}\t{issue['html_url']}")
+
+
+def _stdin_body(args_body: str | None) -> str | None:
+    if args_body is not None:
+        return args_body
+    if not sys.stdin.isatty():
+        return sys.stdin.read()
+    return None
+
+
+# ── Commands ────────────────────────────────────────────────────────────────
+
+def cmd_auth_status(_args: argparse.Namespace) -> int:
+    me = _request("GET", "/user")
+    print(f"Logged in as {me['login']}")
+    print(f"  id: {me['id']}")
+    print(f"  url: {me['html_url']}")
+    return 0
+
+
+def cmd_issue_list(args: argparse.Namespace) -> int:
+    owner, repo = _split_repo(args.repo)
+    params: dict[str, Any] = {"state": args.state, "per_page": args.limit}
+    if args.label:
+        params["labels"] = ",".join(_split_csv(args.label))
+    if args.author:
+        params["creator"] = args.author
+    issues = _request("GET", f"/repos/{owner}/{repo}/issues", params=params)
+    # GitHub's /issues endpoint returns PRs too (PRs are issues in the API).
+    # Filter them out — this CLI is for issues only.
+    issues = [i for i in issues if "pull_request" not in i]
+    if args.json:
+        print(json.dumps(issues, indent=2))
+        return 0
+    if not issues:
+        print(f"No issues matching state={args.state!r}.")
+        return 0
+    for i in issues:
+        print(_format_issue_line(i))
+    return 0
+
+
+def cmd_issue_view(args: argparse.Namespace) -> int:
+    owner, repo = _split_repo(args.repo)
+    issue = _request("GET", f"/repos/{owner}/{repo}/issues/{args.number}")
+    comments = _request("GET",
+                        f"/repos/{owner}/{repo}/issues/{args.number}/comments")
+    if args.json:
+        print(json.dumps({"issue": issue, "comments": comments}, indent=2))
+        return 0
+    labels = ",".join(l["name"] for l in issue.get("labels") or [])
+    user = (issue.get("user") or {}).get("login", "?")
+    print(f"#{issue['number']} [{issue['state']}] {issue['title']}")
+    print(f"by {user} on {issue['created_at']}")
+    print(f"labels: {labels or '(none)'}")
+    print(f"  {issue['html_url']}")
+    print()
+    print(issue.get("body") or "(no body)")
+    if comments:
+        print(f"\n— comments ({len(comments)}) —")
+        for c in comments:
+            cuser = (c.get("user") or {}).get("login", "?")
+            print(f"\n{cuser} @ {c['created_at']}")
+            print(c.get("body") or "")
+    return 0
+
+
+def cmd_issue_create(args: argparse.Namespace) -> int:
+    owner, repo = _split_repo(args.repo)
+    payload: dict[str, Any] = {"title": args.title}
+    body_text = _stdin_body(args.body)
+    if body_text:
+        payload["body"] = body_text
+    labels = _split_csv(args.label)
+    if labels:
+        payload["labels"] = labels
+    if args.assignee:
+        payload["assignees"] = [args.assignee]
+    issue = _request("POST", f"/repos/{owner}/{repo}/issues", body=payload)
+    print(f"Created #{issue['number']}: {issue['html_url']}")
+    return 0
+
+
+def cmd_issue_comment(args: argparse.Namespace) -> int:
+    owner, repo = _split_repo(args.repo)
+    body_text = _stdin_body(args.body)
+    if not body_text:
+        sys.exit("ghi: comment body required (--body or stdin)")
+    out = _request("POST",
+                   f"/repos/{owner}/{repo}/issues/{args.number}/comments",
+                   body={"body": body_text})
+    print(f"Commented on #{args.number}: {out['html_url']}")
+    return 0
+
+
+def cmd_issue_close(args: argparse.Namespace) -> int:
+    owner, repo = _split_repo(args.repo)
+    payload: dict[str, Any] = {"state": "closed"}
+    if args.reason:
+        payload["state_reason"] = args.reason
+    out = _request("PATCH", f"/repos/{owner}/{repo}/issues/{args.number}",
+                   body=payload)
+    print(f"Closed #{out['number']}: {out['html_url']}")
+    return 0
+
+
+def cmd_issue_reopen(args: argparse.Namespace) -> int:
+    owner, repo = _split_repo(args.repo)
+    out = _request("PATCH", f"/repos/{owner}/{repo}/issues/{args.number}",
+                   body={"state": "open", "state_reason": "reopened"})
+    print(f"Reopened #{out['number']}: {out['html_url']}")
+    return 0
+
+
+def cmd_issue_edit(args: argparse.Namespace) -> int:
+    owner, repo = _split_repo(args.repo)
+    payload: dict[str, Any] = {}
+    if args.title is not None:
+        payload["title"] = args.title
+    if args.body is not None:
+        payload["body"] = args.body
+    out: dict | None = None
+    if payload:
+        out = _request("PATCH",
+                       f"/repos/{owner}/{repo}/issues/{args.number}",
+                       body=payload)
+    add = _split_csv(args.add_label)
+    remove = _split_csv(args.remove_label)
+    if add:
+        # POST /issues/N/labels appends without disturbing existing labels.
+        _request("POST",
+                 f"/repos/{owner}/{repo}/issues/{args.number}/labels",
+                 body={"labels": add})
+    for label in remove:
+        # DELETE /issues/N/labels/<name> — 404 = already absent; tolerate.
+        try:
+            _request(
+                "DELETE",
+                f"/repos/{owner}/{repo}/issues/{args.number}/labels/"
+                f"{urllib.parse.quote(label, safe='')}",
+            )
+        except GHError as e:
+            if e.status != 404:
+                raise
+    if out is None:
+        out = _request("GET", f"/repos/{owner}/{repo}/issues/{args.number}")
+    print(f"Updated #{out['number']}: {out['html_url']}")
+    return 0
+
+
+# ── argparse wiring ─────────────────────────────────────────────────────────
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="ghi", description="GitHub Issues CLI (stdlib only)")
+    p.add_argument("--version", action="version", version=f"ghi {VERSION}")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    auth = sub.add_parser("auth", help="auth checks").add_subparsers(
+        dest="sub", required=True)
+    auth.add_parser("status",
+                    help="verify $GH_TOKEN and print authenticated user"
+                    ).set_defaults(func=cmd_auth_status)
+
+    issue = sub.add_parser("issue", help="issue operations").add_subparsers(
+        dest="sub", required=True)
+
+    i_list = issue.add_parser("list", help="list issues (PRs filtered out)")
+    i_list.add_argument("--repo", required=True, help="OWNER/NAME")
+    i_list.add_argument("--state", choices=["open", "closed", "all"],
+                        default="open")
+    i_list.add_argument("--label", help="comma-separated label filter")
+    i_list.add_argument("--author", help="filter by issue creator (login)")
+    i_list.add_argument("--limit", type=int, default=30,
+                        help="per_page; max 100 per GitHub API")
+    i_list.add_argument("--json", action="store_true")
+    i_list.set_defaults(func=cmd_issue_list)
+
+    i_view = issue.add_parser("view", help="view an issue plus its comments")
+    i_view.add_argument("--repo", required=True, help="OWNER/NAME")
+    i_view.add_argument("number", type=int)
+    i_view.add_argument("--json", action="store_true")
+    i_view.set_defaults(func=cmd_issue_view)
+
+    i_create = issue.add_parser("create", help="create a new issue")
+    i_create.add_argument("--repo", required=True, help="OWNER/NAME")
+    i_create.add_argument("--title", required=True)
+    i_create.add_argument("--body", help="(or read from stdin)")
+    i_create.add_argument("--label", help="comma-separated labels")
+    i_create.add_argument("--assignee", help="single assignee login")
+    i_create.set_defaults(func=cmd_issue_create)
+
+    i_comment = issue.add_parser("comment", help="add a comment to an issue")
+    i_comment.add_argument("--repo", required=True, help="OWNER/NAME")
+    i_comment.add_argument("number", type=int)
+    i_comment.add_argument("--body", help="(or read from stdin)")
+    i_comment.set_defaults(func=cmd_issue_comment)
+
+    i_close = issue.add_parser("close", help="close an issue")
+    i_close.add_argument("--repo", required=True, help="OWNER/NAME")
+    i_close.add_argument("number", type=int)
+    i_close.add_argument("--reason",
+                         choices=["completed", "not_planned"],
+                         help="GitHub state_reason on close")
+    i_close.set_defaults(func=cmd_issue_close)
+
+    i_reopen = issue.add_parser("reopen", help="reopen a closed issue")
+    i_reopen.add_argument("--repo", required=True, help="OWNER/NAME")
+    i_reopen.add_argument("number", type=int)
+    i_reopen.set_defaults(func=cmd_issue_reopen)
+
+    i_edit = issue.add_parser("edit", help="edit title/body/labels")
+    i_edit.add_argument("--repo", required=True, help="OWNER/NAME")
+    i_edit.add_argument("number", type=int)
+    i_edit.add_argument("--title")
+    i_edit.add_argument("--body")
+    i_edit.add_argument("--add-label", dest="add_label",
+                        help="comma-separated labels to add")
+    i_edit.add_argument("--remove-label", dest="remove_label",
+                        help="comma-separated labels to remove")
+    i_edit.set_defaults(func=cmd_issue_edit)
+
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        return args.func(args) or 0
+    except GHError as e:
+        print(f"ghi: {e}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())
