@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "deniedMcpServers": [
+    { "serverName": "github" }
+  ],
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ./boot.sh 2>&1 || echo 'Boot failed (non-fatal)'"
+          }
+        ]
+      }
+    ]
+  }
+}
