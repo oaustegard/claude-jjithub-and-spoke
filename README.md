@@ -1,10 +1,10 @@
-# Claude jj and Spoke
+# Claude jjitHub and Spoke
 
 **Give Claude Code on the Web a [`jj` (Jujutsu)](https://jj-vcs.github.io/jj/)
 VCS layer on top of authenticated GitHub access — without `gh` and without
 GitHub PR creation.**
 
-A sibling of [`claude-github-and-spoke`](https://github.com/oaustegard/claude-github-and-spoke)
+A sibling (and portmanteau) of [`claude-github-and-spoke`](https://github.com/oaustegard/claude-github-and-spoke)
 (the `gh` + GitHub-PR-flavored hub) and
 [`claude-tangled-spoke`](https://github.com/oaustegard/claude-tangled-spoke)
 (the Tangled / ATProto hub).
